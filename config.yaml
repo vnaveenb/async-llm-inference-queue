@@ -1,0 +1,33 @@
+server:
+  host: 0.0.0.0
+  port: 8300
+  reload: false
+
+redis:
+  url: redis://localhost:6379/0
+  prefix: "aiq:"
+
+queue:
+  max_depth: 1000
+  backpressure_threshold: 800
+  priority_levels: [critical, high, normal, low]
+  default_priority: normal
+  job_ttl_hours: 24
+
+worker:
+  concurrency: 4
+  poll_interval_ms: 100
+  max_retries: 3
+  base_delay: 1.0
+  jitter: true
+
+inference:
+  mock: false
+  default_model: gemini/gemini-2.5-flash
+  temperature: 0.0
+  max_tokens: 1024
+  timeout_seconds: 60
+
+tracker:
+  enabled: true
+  project_id: async-inference-queue

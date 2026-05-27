@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Async Inference Queue — Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --border: #2a2d3a;
+            --text: #e4e4e7;
+            --muted: #71717a;
+            --accent: #6366f1;
+            --green: #22c55e;
+            --red: #ef4444;
+            --yellow: #eab308;
+            --orange: #f97316;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            background: var(--bg);
+            color: var(--text);
+            padding: 1.5rem;
+            min-height: 100vh;
+        }
+        h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        h1 .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        .card-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--muted);
+            margin-bottom: 0.25rem;
+        }
+        .card-value {
+            font-size: 1.75rem;
+            font-weight: 700;
+        }
+        .card-value.green { color: var(--green); }
+        .card-value.red { color: var(--red); }
+        .card-value.yellow { color: var(--yellow); }
+        .card-value.accent { color: var(--accent); }
+        .charts {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .chart-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        .chart-card h3 {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-bottom: 0.75rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+        th, td {
+            text-align: left;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+        th { color: var(--muted); font-weight: 500; }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+        .badge-queued { background: #6366f133; color: var(--accent); }
+        .badge-running { background: #eab30833; color: var(--yellow); }
+        .badge-completed { background: #22c55e33; color: var(--green); }
+        .badge-failed { background: #ef444433; color: var(--red); }
+        .badge-dead { background: #ef444466; color: #fca5a5; }
+        .badge-critical { background: #ef444433; color: var(--red); }
+        .badge-high { background: #f9731633; color: var(--orange); }
+        .badge-normal { background: #6366f133; color: var(--accent); }
+        .badge-low { background: #71717a33; color: var(--muted); }
+        .backpressure-banner {
+            background: #ef444422;
+            border: 1px solid var(--red);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            margin-bottom: 1rem;
+            display: none;
+            font-size: 0.85rem;
+        }
+        .backpressure-banner.active { display: block; }
+        .refresh-info {
+            font-size: 0.7rem;
+            color: var(--muted);
+            text-align: right;
+            margin-bottom: 0.5rem;
+        }
+        @media (max-width: 768px) {
+            .charts { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <h1><span class="dot"></span> Async Inference Queue</h1>
+
+    <div class="backpressure-banner" id="backpressureBanner">
+        ⚠️ Backpressure active — queue depth exceeds threshold. New submissions returning 429.
+    </div>
+
+    <div class="grid" id="statsGrid">
+        <div class="card">
+            <div class="card-label">Queue Depth</div>
+            <div class="card-value accent" id="queueDepth">—</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Running</div>
+            <div class="card-value yellow" id="running">—</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Completed (1h)</div>
+            <div class="card-value green" id="completed">—</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Failed (1h)</div>
+            <div class="card-value red" id="failed">—</div>
+        </div>
+        <div class="card">
+            <div class="card-label">DLQ Size</div>
+            <div class="card-value red" id="dlqSize">—</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Workers Active</div>
+            <div class="card-value green" id="workers">—</div>
+        </div>
+    </div>
+
+    <div class="charts">
+        <div class="chart-card">
+            <h3>Queue by Priority</h3>
+            <canvas id="priorityChart"></canvas>
+        </div>
+        <div class="chart-card">
+            <h3>Throughput (last 10 polls)</h3>
+            <canvas id="throughputChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="refresh-info">Auto-refresh: 3s | <span id="lastUpdate">—</span></div>
+        <h3 style="font-size:0.85rem; margin-bottom:0.75rem;">Recent Jobs</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Model</th>
+                    <th>Tokens</th>
+                    <th>Latency</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody id="jobsTable">
+                <tr><td colspan="7" style="color:var(--muted)">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const API = window.location.origin;
+        let throughputHistory = [];
+
+        // Charts
+        const priorityCtx = document.getElementById('priorityChart').getContext('2d');
+        const priorityChart = new Chart(priorityCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Critical', 'High', 'Normal', 'Low'],
+                datasets: [{
+                    data: [0, 0, 0, 0],
+                    backgroundColor: ['#ef4444', '#f97316', '#6366f1', '#71717a'],
+                    borderWidth: 0,
+                }],
+            },
+            options: {
+                plugins: { legend: { labels: { color: '#71717a', font: { size: 11 } } } },
+                cutout: '60%',
+            },
+        });
+
+        const throughputCtx = document.getElementById('throughputChart').getContext('2d');
+        const throughputChart = new Chart(throughputCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    { label: 'Queue Depth', data: [], borderColor: '#6366f1', borderWidth: 2, fill: false, tension: 0.3 },
+                    { label: 'Running', data: [], borderColor: '#eab308', borderWidth: 2, fill: false, tension: 0.3 },
+                ],
+            },
+            options: {
+                scales: {
+                    x: { display: false },
+                    y: { ticks: { color: '#71717a' }, grid: { color: '#2a2d3a' } },
+                },
+                plugins: { legend: { labels: { color: '#71717a', font: { size: 11 } } } },
+                animation: false,
+            },
+        });
+
+        async function refresh() {
+            try {
+                // Fetch stats
+                const statsRes = await fetch(`${API}/queue/stats`);
+                const stats = await statsRes.json();
+
+                document.getElementById('queueDepth').textContent = stats.total_depth;
+                document.getElementById('running').textContent = stats.running;
+                document.getElementById('completed').textContent = stats.completed_last_hour;
+                document.getElementById('failed').textContent = stats.failed_last_hour;
+                document.getElementById('dlqSize').textContent = stats.dlq_size;
+                document.getElementById('workers').textContent = stats.workers_active;
+
+                const banner = document.getElementById('backpressureBanner');
+                banner.classList.toggle('active', stats.backpressure_active);
+
+                // Update priority chart
+                priorityChart.data.datasets[0].data = [
+                    stats.by_priority.critical || 0,
+                    stats.by_priority.high || 0,
+                    stats.by_priority.normal || 0,
+                    stats.by_priority.low || 0,
+                ];
+                priorityChart.update();
+
+                // Update throughput chart
+                const now = new Date().toLocaleTimeString();
+                throughputHistory.push({ time: now, depth: stats.total_depth, running: stats.running });
+                if (throughputHistory.length > 10) throughputHistory.shift();
+
+                throughputChart.data.labels = throughputHistory.map(h => h.time);
+                throughputChart.data.datasets[0].data = throughputHistory.map(h => h.depth);
+                throughputChart.data.datasets[1].data = throughputHistory.map(h => h.running);
+                throughputChart.update();
+
+                // Fetch recent jobs
+                const jobsRes = await fetch(`${API}/jobs?limit=20`);
+                const jobs = await jobsRes.json();
+
+                const tbody = document.getElementById('jobsTable');
+                if (jobs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted)">No jobs yet</td></tr>';
+                } else {
+                    tbody.innerHTML = jobs.map(j => `
+                        <tr>
+                            <td title="${j.id}">${j.id.slice(0, 8)}…</td>
+                            <td><span class="badge badge-${j.status}">${j.status}</span></td>
+                            <td><span class="badge badge-${j.priority}">${j.priority}</span></td>
+                            <td>${j.model.split('/').pop()}</td>
+                            <td>${j.input_tokens + j.output_tokens || '—'}</td>
+                            <td>${j.latency_ms ? j.latency_ms + 'ms' : '—'}</td>
+                            <td>${new Date(j.created_at).toLocaleTimeString()}</td>
+                        </tr>
+                    `).join('');
+                }
+
+                document.getElementById('lastUpdate').textContent = `Updated: ${now}`;
+            } catch (e) {
+                console.error('Refresh failed:', e);
+            }
+        }
+
+        refresh();
+        setInterval(refresh, 3000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+services:
+  queue-api:
+    build: .
+    container_name: async-inference-queue
+    ports:
+      - "8310:8300"
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - TRACKER_DB_PATH=/app/data/usage.db
+    volumes:
+      - tracker_data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8300/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: aiq-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  tracker_data:
+    external: true
