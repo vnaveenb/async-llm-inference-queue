@@ -1,16 +1,18 @@
-# 07 — Async Inference Queue
+# Async Inference Queue
 
 > Redis-backed priority job queue for LLM inference with configurable workers, backpressure, dead-letter queue, and real-time monitoring dashboard.
 
-![Status](https://img.shields.io/badge/status-active-brightgreen)
-![Python](https://img.shields.io/badge/python-3.12+-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688)
-![Redis](https://img.shields.io/badge/Redis-7+-DC382D)
-![LiteLLM](https://img.shields.io/badge/LiteLLM-1.67+-orange)
+![Status](https://img.shields.io/badge/Status-Active-brightgreen)
+![Python](https://img.shields.io/badge/Python-3.12%2B-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-7--alpine-DC382D?logo=redis&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![LiteLLM](https://img.shields.io/badge/LLM-LiteLLM_1.67+-purple)
+![Tests](https://img.shields.io/badge/Tests-36%20passing-brightgreen)
 
 ---
 
-## Why This Project
+## What This Does
 
 Production LLM systems need asynchronous processing — you can't hold an HTTP connection open for 30+ seconds while a model generates. This project demonstrates:
 
@@ -21,22 +23,24 @@ Production LLM systems need asynchronous processing — you can't hold an HTTP c
 - **Worker concurrency control** — bounded parallelism via configurable pool
 - **Dual-mode inference** — real LiteLLM calls or mock mode for demos
 
+**Why this matters for interviews:** Most people demo synchronous LLM wrappers. This handles the real problem — what happens when 100 users hit your API at once while each LLM call takes 10 seconds? The answer is a queue with priority, backpressure, retries, and a dead-letter queue.
+
 ---
 
 ## Quick Start
 
 ```bash
-# Clone and enter project
 cd projects/07-async-inference-queue
 
-# Option A: Docker (recommended)
+# 1. Configure your API key
+cp .env.example .env
+# Edit .env with your GEMINI_API_KEY
+
+# 2. Start (Docker)
 docker compose up --build
 
-# Option B: Local dev
-python -m venv .venv && .venv\Scripts\activate
-pip install -r requirements.txt
-# Start Redis (WSL or Docker): redis-server
-uvicorn src.api:app --reload --port 8300
+# 3. Open dashboard
+# http://localhost:8310/
 ```
 
 ```bash
@@ -50,10 +54,54 @@ curl http://localhost:8310/jobs/{job_id}
 
 # View queue stats
 curl http://localhost:8310/queue/stats
-
-# Dashboard
-open http://localhost:8310/
 ```
+
+Or open **http://localhost:8310/docs** for the interactive Swagger UI.
+
+---
+
+## Docker
+
+Two services: the queue API and Redis. Redis is internal-only (no host port exposed).
+
+### Build & Run
+
+```bash
+# Create shared volume (one-time, shared with Project 06)
+docker volume create tracker_data
+
+# Build and start
+docker compose up --build -d
+
+# Verify
+curl http://localhost:8310/health
+```
+
+### With Project 06 (shared cost tracking)
+
+```bash
+# Both services mount the same volume — every inference call is cost-tracked
+# Project 06 dashboard shows queue costs at http://localhost:8102/dashboard
+docker compose up -d  # Project 06
+docker compose up -d  # Project 07 (this one)
+```
+
+The queue mounts `tracker_data:/app/data` — the same named volume Project 06 reads — so every LLM call appears on the cost dashboard automatically.
+
+### Ports
+
+| Service | Internal | External | Notes |
+|---------|----------|----------|-------|
+| queue-api | 8300 | **8310** | API + Dashboard |
+| redis | 6379 | — | Internal only (no conflict with other Redis instances) |
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | Yes (real mode) | LLM API key for LiteLLM |
+| `REDIS_URL` | No | Override Redis connection (default: `redis://redis:6379/0` in Docker) |
+| `TRACKER_DB_PATH` | No | Path to Project 06 usage DB for cost tracking |
 
 ---
 
@@ -245,16 +293,7 @@ inference:
 
 ## Integration with Project 06
 
-When deployed alongside the Token + Cost Budget Dashboard (Project 06), inference costs are automatically tracked:
-
-```yaml
-# docker-compose.yml shares the tracker_data volume
-volumes:
-  tracker_data:
-    external: true
-```
-
-Set `TRACKER_DB_PATH=/app/data/usage.db` and the queue will log every inference call to the shared SQLite database.
+When deployed alongside the Token + Cost Budget Dashboard (Project 06), inference costs are automatically tracked via the shared `tracker_data` Docker volume. Set `TRACKER_DB_PATH=/app/data/usage.db` and the queue logs every inference call to the shared SQLite database — visible in real-time on the Project 06 dashboard.
 
 ---
 
@@ -270,28 +309,9 @@ Set `TRACKER_DB_PATH=/app/data/usage.db` and the queue will log every inference 
 | `test_inference.py` | 5 | Mock mode, real mode, latency, tracker metadata |
 
 ```bash
-pytest tests/ -v
+# Run tests inside Docker
+docker compose exec queue-api pytest tests/ -v
 ```
-
----
-
-## Docker Deployment
-
-```bash
-# Create shared volume (one-time, shared with Project 06)
-docker volume create tracker_data
-
-# Build and run
-docker compose up --build -d
-
-# Verify
-curl http://localhost:8310/health
-```
-
-**Ports:**
-- `8310` → queue-api (external)
-- `8300` → queue-api (internal)
-- Redis: internal only (no host port conflict)
 
 ---
 
