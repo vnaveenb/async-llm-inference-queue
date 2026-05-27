@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
-from fastapi import Request, HTTPException
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from .config import get_config
 from .queue import queue_depth
@@ -23,9 +24,9 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
             depth = await queue_depth()
             if depth >= cfg.queue.backpressure_threshold:
                 logger.warning(f"Backpressure active: queue depth {depth} >= {cfg.queue.backpressure_threshold}")
-                raise HTTPException(
+                return JSONResponse(
                     status_code=429,
-                    detail={
+                    content={
                         "error": "Queue backpressure active",
                         "queue_depth": depth,
                         "threshold": cfg.queue.backpressure_threshold,

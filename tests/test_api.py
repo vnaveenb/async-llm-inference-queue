@@ -136,11 +136,11 @@ async def test_backpressure_429(client):
         await client.post("/jobs", json={"prompt": "1"})
         await client.post("/jobs", json={"prompt": "2"})
 
-        # Third should be rejected
+        # Third should be rejected with 429
         resp = await client.post("/jobs", json={"prompt": "3"})
-        # Note: the backpressure middleware checks actual queue depth,
-        # so this test validates the middleware path exists
-        assert resp.status_code in (200, 429)
+        assert resp.status_code == 429
+        data = resp.json()
+        assert data["error"] == "Queue backpressure active"
 
 
 @pytest.mark.asyncio
