@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12.13-slim
 
 RUN groupadd -r queue && useradd -r -g queue -m queue
 
