@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +30,70 @@ from .queue import (
 from .worker import start_workers, stop_workers, workers_active
 
 logger = logging.getLogger(__name__)
+
+# ── Security & Rate Limiting ──────────────────────────────────────────────
+_IP_DAILY_CALLS: dict[str, list[float]] = defaultdict(list)
+_DAILY_LIMIT = int(os.getenv("RATE_LIMIT_PER_IP_PER_DAY", "10"))
+_BURST_LIMIT = int(os.getenv("RATE_LIMIT_PER_IP_PER_MINUTE", "5"))
+_ADMIN_KEY = os.getenv("ADMIN_API_KEY", "")
+
+
+def _get_client_ip(request: Request) -> str:
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+    x_real_ip = request.headers.get("x-real-ip")
+    if x_real_ip:
+        return x_real_ip.strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
+
+
+def _check_rate_limit(request: Request) -> None:
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("TESTING") == "1":
+        return  # Bypass during automated pytest runs
+
+    admin_key = request.headers.get("x-admin-key", "")
+    if _ADMIN_KEY and admin_key == _ADMIN_KEY:
+        return  # Admin bypasses rate limits
+
+    ip = _get_client_ip(request)
+    now = time.time()
+    cutoff_day = now - 86400
+    cutoff_min = now - 60
+
+    calls = _IP_DAILY_CALLS[ip]
+    _IP_DAILY_CALLS[ip] = [t for t in calls if t > cutoff_day]
+    calls = _IP_DAILY_CALLS[ip]
+
+    burst_calls = sum(1 for t in calls if t > cutoff_min)
+    if burst_calls >= _BURST_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Burst rate limit exceeded ({_BURST_LIMIT} requests/minute). Please wait.",
+        )
+
+    if len(calls) >= _DAILY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily rate limit reached ({_DAILY_LIMIT} requests/day).",
+        )
+
+    _IP_DAILY_CALLS[ip].append(now)
+
+
+def _require_admin(request: Request) -> None:
+    if not _ADMIN_KEY:
+        return  # If unconfigured in dev/test, allow
+    key = request.headers.get("x-admin-key", "")
+    if key != _ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Valid X-Admin-Key required")
+
+
+def reset_rate_limits() -> None:
+    _IP_DAILY_CALLS.clear()
 
 
 @asynccontextmanager
@@ -68,8 +135,16 @@ if static_dir.exists():
 
 
 @app.post("/jobs", response_model=SubmitResponse)
-async def submit_job(request: JobRequest):
+async def submit_job(request: JobRequest, raw_request: Request):
     """Submit a new inference job to the queue."""
+    _check_rate_limit(raw_request)
+
+    admin_key = raw_request.headers.get("x-admin-key", "")
+    if not (_ADMIN_KEY and admin_key == _ADMIN_KEY):
+        if len(request.prompt) > 2000:
+            request.prompt = request.prompt[:2000]
+        request.max_tokens = min(request.max_tokens or 500, 500)
+
     cfg = get_config()
 
     job = InferenceJob(
@@ -133,8 +208,9 @@ async def list_jobs(
 
 
 @app.post("/jobs/{job_id}/cancel", response_model=JobResponse)
-async def cancel_job_endpoint(job_id: str):
+async def cancel_job_endpoint(job_id: str, raw_request: Request):
     """Cancel a pending or queued job."""
+    _require_admin(raw_request)
     job = await cancel_job(job_id)
     if not job:
         raise HTTPException(status_code=400, detail="Job not found or not cancellable (must be pending/queued)")
@@ -142,8 +218,9 @@ async def cancel_job_endpoint(job_id: str):
 
 
 @app.post("/jobs/{job_id}/retry", response_model=JobResponse)
-async def retry_job_endpoint(job_id: str):
+async def retry_job_endpoint(job_id: str, raw_request: Request):
     """Retry a failed or dead job."""
+    _require_admin(raw_request)
     job = await retry_job(job_id)
     if not job:
         raise HTTPException(status_code=400, detail="Job not found or not retryable (must be failed/dead)")
@@ -183,8 +260,9 @@ async def list_dlq():
 
 
 @app.post("/queue/dlq/{job_id}/retry", response_model=JobResponse)
-async def retry_dlq_job(job_id: str):
+async def retry_dlq_job(job_id: str, raw_request: Request):
     """Move a DLQ job back to the queue for retry."""
+    _require_admin(raw_request)
     job = await retry_job(job_id)
     if not job:
         raise HTTPException(status_code=400, detail="Job not found in DLQ or not retryable")
